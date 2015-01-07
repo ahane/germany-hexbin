@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<style>
+body {
+    background-color: #ddd;
+}
+
+path {
+    fill: none;
+    stroke-linejoin: round;
+}
+
+.land  {
+    //fill: #ddd;
+    stroke: #333;
+    stroke-width: px;
+}
+
+.hexagons {
+    stroke: #ddd;
+}
+
+.text {
+    font-family: "Helvetica", sans-serif;
+    font-size: 2em;
+    fill: #333;
+}
+
+</style>
+<body>
+    <div class="chart"></div>
+        <div id="linearLegend" class="legend"></div>
+</body>
+<script src='d3.min.js'></script>
+<script src='hexbin.js'></script>
+<script src='colorlegend.js'></script>
+<script src='queue.v1.min.js'></script>
+<script src='topojson.v1.min.js'></script>
+<script>
+var deb;
+var width = 960,
+    height = 700,
+    binradius = 8;
+
+var inputFormat = d3.time.format("%Y-%m"),
+    outputFormat = d3.time.format("%b %Y");
+
+var svg = d3.select(".chart").append("svg")
+    .attr("width", width)
+    .attr("height", height);
+
+//init vars for use in ready()
+var monthLabel,
+    totalLabel,
+    hexagons,
+    statePaths,
+    plzBins,
+    months = [],
+    currMonthInd = 0,
+    totalMw = 0;
+
+var hexbin = d3.hexbin()
+    .size([width, height])
+    .radius(binradius);
+
+var bincolor = d3.scale.quantile()
+    .range(["#fff5eb", "#fee6ce", "#fdd0a2", "#fdae6b", "#fd8d3c", "#f16913", "#d94801", "#a63603", "#7f2704"])
+
+var projection = d3.geo.albers()
+                .center([0, 51.2])
+                .rotate([-10.8, 0])
+                .parallels([47, 55])
+                .scale(5000)
+                .translate([width / 2, height / 2]);
+
+var pathgen = d3.geo.path()
+    .projection(projection);
+
+queue()
+    .defer(d3.json, "german_states_places.topo-ms.json")
+    .defer(d3.csv, "hexbin_monthly_small2.csv")
+    .await(ready);
+
+function updateRunningKwSum(bins, month) {
+        bins.forEach(function (b) {   
+            b.currMonth = month;
+            if (b.runningKWSum != undefined) {
+                b.runningKWSum += d3.sum(b, function (plz) { return plz[month]; });
+            }
+            else {
+                b.runningKWSum = d3.sum(b, function (plz) { return plz[month]; })
+            }
+        });
+}
+
+function ready(error, germany, kwTimeSeries) {
+    if (error) return console.error(error);
+    
+    var states = topojson.feature(germany, germany.objects['german_states.geo']),
+        cities = topojson.feature(germany, germany.objects['german_places.geo']);
+    
+    
+    genericRow = kwTimeSeries[0];
+
+    //Extract months
+    for (var key in genericRow) {
+        if (key != 'lat' && key != 'lon' && key != 'plz') months.push(key);
+    }
+    months = months.sort(d3.ascending);
+    
+
+    //compute totals for plz, 
+    kwTimeSeries.forEach(function (plz) {
+        plz.total = 0;
+        months.forEach(function (month) {
+            var monthlyKw = +plz[month]; // cast to number
+            plz[month] = monthlyKw; 
+            plz.total += monthlyKw;
+            var p = projection([plz.lat, plz.lon]);
+            plz[0] = p[0]; //hexbin needs these fields!
+            plz[1] = p[1];
+        });
+    });
+
+    // Compute the totals of the bins
+    plzBins = hexbin(kwTimeSeries);
+    plzBins.forEach(function (b) {
+        b.total = 0;
+        b.forEach(function (plz) {
+            b.total += plz.total;
+        })
+    });
+
+    bincolor.domain(plzBins.map(function(b){return b.total;}));
+
+    updateRunningKwSum(plzBins, months[currMonthInd]);
+    totalMw = d3.sum(plzBins, function (b) { return (b.runningKWSum/1000).toFixed(0); });
+
+    hexagons = svg.append("g")
+        .attr("class", "hexagons")
+        .selectAll("path")
+        .data(plzBins, function (d) { return d.i + "," + d.j; })
+        .enter().append("path")
+        .attr("d", function (d) { return hexbin.hexagon(binradius) })
+        .attr("transform", function (d) { return "translate("+d.x+","+d.y+")"; })
+        .style("fill", function (d) { return bincolor(d.runningKWSum); });
+
+    monthLabel = svg.append("text")
+        .attr("x", 800)
+        .attr("y", 200)
+        .attr("class", "text")
+        .datum(currMonthInd)
+        .text(function (d) { return outputFormat(inputFormat.parse(months[d])); });
+
+    totalLabel = svg.append("text")
+        .attr("x", 800)
+        .attr("y", 230)
+        .attr("class", "text")
+        .text(totalMw + ' MWp');
+
+    statePaths = svg.selectAll(".states")
+        .data(states.features)
+        .enter().append("path")
+        .attr("d", pathgen)
+        .attr("class", "land");
+
+
+    start();
+}
+
+var redraw = function () {
+        if (currMonthInd < months.length) currMonthInd += 1;
+        else if (currMonthInd == months.length) clearInterval(window.refresherId);
+
+        totalMw = d3.sum(plzBins, function (b) { return (b.runningKWSum/1000).toFixed(0); });
+        totalLabel.text(totalMw +' MWp');
+
+        monthLabel.datum(currMonthInd)
+            .text(function (d) { return outputFormat(inputFormat.parse(months[d])); });
+
+        updateRunningKwSum(plzBins, months[currMonthInd]);
+
+        hexagons = hexagons
+            .data(plzBins, function (d) { return d.i + "," + d.j; })
+        hexagons.transition(d3.interpolatLab)
+            .duration(700)
+            .style("fill", function (d) { return bincolor(d.runningKWSum); });
+}
+
+function start() {
+    window.refresherId = setInterval(redraw, 700);
+}
+
+</script>
